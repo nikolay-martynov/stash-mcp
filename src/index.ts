@@ -41,6 +41,8 @@ interface RepositoryParams {
 
 interface PullRequestParams extends RepositoryParams {
   prId?: number;
+  limit?: number;
+  start?: number;
 }
 
 interface MergeOptions {
@@ -465,6 +467,8 @@ class StashServer {
               project: { type: 'string', description: 'Bitbucket project key (optional if default project configured).' },
               repository: { type: 'string', description: 'Repository slug containing the pull request.' },
               prId: { type: 'number', description: 'Pull request ID to get reviews for.' },
+              limit: { type: 'number', description: 'Activities per page (default: 25, max: 100). Reviews are filtered from the page, so page until isLastPage.' },
+              start: { type: 'number', description: 'Start index for pagination (default: 0).' },
             },
             required: ['repository', 'prId'],
           },
@@ -478,6 +482,8 @@ class StashServer {
               project: { type: 'string', description: 'Bitbucket project key (optional if default project configured).' },
               repository: { type: 'string', description: 'Repository slug containing the pull request.' },
               prId: { type: 'number', description: 'Pull request ID to get activities for.' },
+              limit: { type: 'number', description: 'Activities per page (default: 25, max: 100).' },
+              start: { type: 'number', description: 'Start index for pagination (default: 0).' },
             },
             required: ['repository', 'prId'],
           },
@@ -491,6 +497,8 @@ class StashServer {
               project: { type: 'string', description: 'Bitbucket project key (optional if default project configured).' },
               repository: { type: 'string', description: 'Repository slug containing the pull request.' },
               prId: { type: 'number', description: 'Pull request ID to get comments for.' },
+              limit: { type: 'number', description: 'Activities per page (default: 25, max: 100). Comments are filtered from the page, so page until isLastPage.' },
+              start: { type: 'number', description: 'Start index for pagination (default: 0).' },
             },
             required: ['repository', 'prId'],
           },
@@ -538,6 +546,7 @@ class StashServer {
               path: { type: 'string', description: 'Directory path to browse (default: root).' },
               branch: { type: 'string', description: 'Branch or commit hash (optional).' },
               limit: { type: 'number', description: 'Maximum items to return (default: 50).' },
+              start: { type: 'number', description: 'Start index for pagination (default: 0).' },
             },
             required: ['repository'],
           },
@@ -717,6 +726,8 @@ class StashServer {
               project: projectKey,
               repository: args.repository as string,
               prId: args.prId as number,
+              limit: args.limit as number,
+              start: args.start as number,
             });
 
           case 'get_activities':
@@ -724,6 +735,8 @@ class StashServer {
               project: projectKey,
               repository: args.repository as string,
               prId: args.prId as number,
+              limit: args.limit as number,
+              start: args.start as number,
             });
 
           case 'get_comments':
@@ -731,6 +744,8 @@ class StashServer {
               project: projectKey,
               repository: args.repository as string,
               prId: args.prId as number,
+              limit: args.limit as number,
+              start: args.start as number,
             });
 
           case 'search':
@@ -760,6 +775,7 @@ class StashServer {
               path: args.path as string,
               branch: args.branch as string,
               limit: args.limit as number,
+              start: args.start as number,
             });
 
           case 'get_branch_diff':
@@ -1037,13 +1053,23 @@ class StashServer {
     }
 
     const api = this.getApi();
-    const response = await api.get(`/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/activities`);
+    const { limit = 25, start = 0 } = params;
+    const response = await api.get(`/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/activities`, { params: { limit, start } });
 
     const reviews = response.data.values.filter(
       (activity: BitbucketActivity) => activity.action === 'APPROVED' || activity.action === 'REVIEWED'
     );
 
-    return { content: [{ type: 'text', text: JSON.stringify(reviews, null, 2) }] };
+    const result = {
+      size: response.data.size,
+      limit: response.data.limit,
+      isLastPage: response.data.isLastPage,
+      start: response.data.start,
+      nextPageStart: response.data.nextPageStart,
+      reviews,
+    };
+
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }
 
   private async getActivities(params: PullRequestParams) {
@@ -1053,7 +1079,8 @@ class StashServer {
     }
 
     const api = this.getApi();
-    const response = await api.get(`/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/activities`);
+    const { limit = 25, start = 0 } = params;
+    const response = await api.get(`/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/activities`, { params: { limit, start } });
 
     const condensed = {
       size: response.data.size,
@@ -1207,11 +1234,21 @@ class StashServer {
     }
 
     const api = this.getApi();
-    const response = await api.get(`/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/activities`);
+    const { limit = 25, start = 0 } = params;
+    const response = await api.get(`/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/activities`, { params: { limit, start } });
 
     const comments = response.data.values.filter((activity: BitbucketActivity) => activity.action === 'COMMENTED');
 
-    return { content: [{ type: 'text', text: JSON.stringify(comments, null, 2) }] };
+    const result = {
+      size: response.data.size,
+      limit: response.data.limit,
+      isLastPage: response.data.isLastPage,
+      start: response.data.start,
+      nextPageStart: response.data.nextPageStart,
+      comments,
+    };
+
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
   }
 
   private async search(options: SearchOptions) {
@@ -1331,15 +1368,15 @@ class StashServer {
     return { content: [{ type: 'text', text: JSON.stringify(fileContent, null, 2) }] };
   }
 
-  private async browseRepository(options: { project?: string; repository?: string; path?: string; branch?: string; limit?: number }) {
+  private async browseRepository(options: { project?: string; repository?: string; path?: string; branch?: string; limit?: number; start?: number }) {
     this.requireProject(options.project, options.repository);
     if (!options.repository) {
       throw new McpError(ErrorCode.InvalidParams, 'Repository is required');
     }
 
     const api = this.getApi();
-    const { project, repository, path = '', branch, limit = 50 } = options;
-    const params: Record<string, string | number> = { limit };
+    const { project, repository, path = '', branch, limit = 50, start = 0 } = options;
+    const params: Record<string, string | number> = { limit, start };
 
     if (branch) {
       params.at = branch;
