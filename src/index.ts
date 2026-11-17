@@ -61,6 +61,10 @@ interface InlineCommentOptions extends CommentOptions {
   lineType: 'ADDED' | 'REMOVED';
 }
 
+interface CommentParams extends PullRequestParams {
+  commentId?: number;
+}
+
 interface PullRequestInput extends RepositoryParams {
   title: string;
   description?: string;
@@ -432,6 +436,22 @@ class StashServer {
           },
         },
         {
+          name: 'resolve_comment',
+          description:
+            'Resolve or unresolve a pull request comment thread (the UI "Resolve" action). Sets threadResolved on the thread; pass the ROOT comment id (the one with the anchor), not a reply. Does not change the comment task state.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              project: { type: 'string', description: 'Bitbucket project key (optional if default project configured).' },
+              repository: { type: 'string', description: 'Repository slug containing the pull request.' },
+              prId: { type: 'number', description: 'Pull request ID.' },
+              commentId: { type: 'number', description: 'ID of the root comment of the thread to resolve.' },
+              resolved: { type: 'boolean', description: 'true to resolve the thread (default), false to unresolve it.' },
+            },
+            required: ['repository', 'prId', 'commentId'],
+          },
+        },
+        {
           name: 'get_diff',
             description: 'Retrieve the diff for a pull request. Returns files in chunks (default 30 files per chunk) to avoid overwhelming output. Use fileOffset to paginate through files. Each file is also truncated by maxLinesPerFile.',
             inputSchema: {
@@ -706,6 +726,17 @@ class StashServer {
                 line: args.line as number,
                 lineType: args.lineType as InlineCommentOptions['lineType'],
               }
+            );
+
+          case 'resolve_comment':
+            return await this.resolveComment(
+              {
+                project: projectKey,
+                repository: args.repository as string,
+                prId: args.prId as number,
+                commentId: args.commentId as number,
+              },
+              args.resolved === undefined ? true : Boolean(args.resolved)
             );
 
           case 'get_diff':
@@ -1004,6 +1035,78 @@ class StashServer {
     });
 
     return { content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }] };
+  }
+
+  private async resolveComment(params: CommentParams, resolved: boolean) {
+    this.requireProject(params.project, params.repository, params.prId);
+    if (!params.repository || !params.prId || !params.commentId) {
+      throw new McpError(ErrorCode.InvalidParams, 'Repository, prId and commentId are required');
+    }
+
+    const api = this.getApi();
+    const base = `/projects/${params.project}/repos/${params.repository}/pull-requests/${params.prId}/comments/${params.commentId}`;
+
+    // Idempotency: do not bump the comment version when it is already in the requested state.
+    const current = await api.get(base);
+    if (Boolean(current.data.threadResolved) === resolved) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                id: params.commentId,
+                threadResolved: resolved,
+                changed: false,
+                version: current.data.version,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    let response;
+    try {
+      response = await api.put(base, { threadResolved: resolved, version: current.data.version });
+    } catch (error) {
+      // 409 - the version is stale (a reply or another resolve happened in between).
+      if (axios.isAxiosError(error) && error.response?.status === 409) {
+        const fresh = await api.get(base);
+        response = await api.put(base, { threadResolved: resolved, version: fresh.data.version });
+      } else {
+        throw error;
+      }
+    }
+
+    const c = response.data;
+    if (c.threadResolved === undefined) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        'Server did not return threadResolved; the thread state is unknown'
+      );
+    }
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              id: c.id,
+              threadResolved: c.threadResolved,
+              state: c.state,
+              threadResolvedDate: this.epochToIso(c.threadResolvedDate),
+              version: c.version,
+              changed: true,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
   }
 
   private async getDiff(params: PullRequestParams, contextLines = 10, maxLinesPerFile?: number, fileOffset = 0, fileLimit = 30) {
